@@ -1,0 +1,22 @@
+[package]
+name = "clauses"
+version = "0.1.0"
+authors = ["Michael Rawson <michael@rawsons.uk>"]
+edition = "2018"
+
+[lib]
+name = "clauses"
+crate-type = ["cdylib"]
+
+[dependencies]
+numpy = "0.7"
+petgraph = "0.5"
+tptp = "0.14"
+
+[dependencies.pyo3]
+version = "0.8"
+features = ["extension-module"]
+
+[profile.release]
+codegen-units = 1
+lto = true
