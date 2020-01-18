@@ -1,18 +1,12 @@
 import subprocess
 
+import atp
 import clauses
-import vampire
-
-class ProvedIt(Exception):
-    pass
-
-class Timeout(Exception):
-    pass
 
 class Environment:
     def __init__(self, problem):
         self.problem = problem
-        clauses = vampire.clausify(problem)
+        clauses = atp.clausify(problem)
 
         self.actions = [
             clause for clause in clauses
@@ -28,18 +22,13 @@ class Environment:
         self.initial = self.score
 
     def _update_actions(self):
-        inferred = vampire.infer(self.selected)
-        if inferred is None:
-            raise ProvedIt()
+        inferred = atp.infer(self.selected)
         self.actions = self.actions[:self.axioms_available] + inferred
 
     def _update_score(self):
-        try:
-            self.score = vampire.score(
-                self.actions[:self.axioms_available] + self.selected
-            )
-        except subprocess.TimeoutExpired:
-            raise Timeout()
+        self.score = atp.score(
+            self.actions[:self.axioms_available] + self.selected
+        )
 
     def transform(self):
     	return clauses.graph(self.selected, self.actions)

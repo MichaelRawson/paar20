@@ -1,11 +1,30 @@
 import torch
-from torch.nn import BatchNorm1d, Dropout, Linear, Module, ModuleList
+from torch.nn import Linear, Module, ModuleList
 from torch.nn.functional import relu
 from torch_geometric import nn as geom
-from torch_geometric.utils import to_undirected
+from torch_geometric.utils import degree
 
-LAYERS = 16
+LAYERS = 32
 K = 8
+
+class GCNConv(geom.MessagePassing):
+    def __init__(self, in_channels, out_channels, **kwargs):
+        super().__init__(aggr='add', **kwargs)
+        self.weight = Linear(in_channels, out_channels, bias=False)
+
+    def forward(self, x, edge_index):
+        x = self.weight(x)
+        return self.propagate(edge_index, size=(x.size(0), x.size(0)), x=x)
+
+    def message(self, x_j, edge_index, size):
+        row, col = edge_index
+        deg = degree(row, size[0], dtype=x_j.dtype)
+        deg_inv_sqrt = deg.pow(-0.5)
+        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+        return norm.view(-1, 1) * x_j
+
+    def update(self, aggr_out):
+        return aggr_out
 
 class FullyConnectedLayer(Module):
     def __init__(self, in_channels, out_channels):
@@ -20,8 +39,13 @@ class FullyConnectedLayer(Module):
 class ConvLayer(Module):
     def __init__(self):
         super().__init__()
-        self.conv_in = geom.GCNConv(K, K)
-        self.conv_out = geom.GCNConv(K, K, flow='target_to_source')
+        self.conv_in = GCNConv(
+            K, K,
+        )
+        self.conv_out = GCNConv(
+            K, K,
+            flow='target_to_source'
+        )
 
     def forward(self, x, edge_index):
         x = relu(x)
@@ -52,7 +76,7 @@ class DenseBlock(Module):
 
         return torch.cat(outputs, dim=1)
 
-class Actor(Module):
+class Q(Module):
     def __init__(self, features):
         super().__init__()
         self.fc = FullyConnectedLayer(features, 128)
@@ -61,34 +85,16 @@ class Actor(Module):
     def forward(self, actions):
         return self.policy(self.fc(actions)).reshape(-1)
 
-class Critic(Module):
-    def __init__(self, features):
-        super().__init__()
-        self.fc = FullyConnectedLayer(2 * features, 128)
-        self.value = FullyConnectedLayer(128, 1)
-
-    def forward(self, clauses):
-        max_pooled = clauses.max(dim=0)[0]
-        mean_pooled = clauses.mean(dim=0)
-        pooled = torch.cat([max_pooled, mean_pooled], dim=0)
-        return self.value(self.fc(pooled)).reshape(())
-
 class Model(Module):
     def __init__(self):
         super().__init__()
-        self.input = Linear(11, 2 * K)
+        self.input = Linear(11, 2 * K, bias=False)
         self.dense = DenseBlock(LAYERS)
-        self.actor = Actor(2 * K * (LAYERS + 1))
-        self.critic = Critic(2 * K * (LAYERS + 1))
+        self.q = Q(2 * K * (LAYERS + 1))
 
     def forward(self, data):
         x = data.x
-        edge_index = data.edge_index
-        action_index = data.action_index
-        clause_index = data.clause_index
-
         x = self.input(x)
-        x = self.dense(x, edge_index)
+        x = self.dense(x, data.edge_index)
         actions = x[data.action_index]
-        clauses = x[data.clause_index]
-        return (self.actor(actions), self.critic(clauses))
+        return self.q(actions)
