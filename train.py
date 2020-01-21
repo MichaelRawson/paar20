@@ -1,9 +1,11 @@
 import gc
 from glob import glob
+import traceback
 import random
+import warnings
 
 import torch
-from torch.nn.functional import smooth_l1_loss
+from torch.nn.functional import mse_loss
 from torch.optim import RMSprop
 from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.data import Data
@@ -14,17 +16,17 @@ from environment import Environment
 from model import Model
 from replay import Replay
 
-EPISODE_LENGTH = 10
+MAX_EPISODE_LENGTH = 10
 GAMMA = 0.99
 MAX_EPSILON = 1.0
 MIN_EPSILON = 0.1
 EPSILON_DECAY = 0.9995
 REPLAY_SIZE = 50000
 MIN_REPLAY = 256
-TARGET_UPDATE = 100
+TARGET_UPDATE = 1000
 
 MINIBATCH = 32
-LR = 1e-3
+LR = 5e-4
 ALPHA = 0.95
 
 def preprocess(env):
@@ -41,10 +43,11 @@ def preprocess(env):
     return data
 
 def episode(model, path, epsilon):
+    print(path)
     try:
         env = Environment(path)
     except (Timeout, ProvedIt, Crashed):
-        print(f"{path}: skipped")
+        print("skipped")
         return []
 
     data = preprocess(env)
@@ -52,7 +55,7 @@ def episode(model, path, epsilon):
     total = 0
     transitions = []
 
-    for t in range(EPISODE_LENGTH):
+    for t in range(MAX_EPISODE_LENGTH):
         # shouldn't happen, very occasionally does (??)
         if len(env.actions) == 0:
             break
@@ -72,13 +75,17 @@ def episode(model, path, epsilon):
             reward = 1 - total
             terminal = True
         except Crashed:
-            print(f"{path}: crashed")
+            print("crashed")
             return []
 
-        total += reward
-        if total + reward <= -1.0 or t == EPISODE_LENGTH - 1:
+        if total + reward <= -1.0:
+            reward = -1 - total
             terminal = True
 
+        if t == MAX_EPISODE_LENGTH - 1:
+            terminal = True
+
+        total += reward
         if terminal:
             next_data = None
         else:
@@ -90,14 +97,17 @@ def episode(model, path, epsilon):
         if terminal:
             break
 
-    print(f"{path}: OK")
     return transitions
 
 def main():
-    paths = ['Problems/GRP/GRP001-1.p'] #glob('m2k/*')
+    paths = open('GRP.txt').read().split('\n')
 
     model = Model().to('cuda')
+    model.train()
     target = Model().to('cuda')
+    target.eval()
+    warnings.filterwarnings("ignore", message="None of the inputs have requires_grad=True. Gradients will be None")
+
     epsilon = MAX_EPSILON
     optimizer = RMSprop(model.parameters(), lr=LR, alpha=ALPHA)
     replay = Replay(REPLAY_SIZE)
@@ -106,9 +116,16 @@ def main():
     episodes = 0
     examples = 0
     parameter_updates = 0
+
+    print("start")
     while True:
         path = random.choice(paths)
-        transitions = episode(model, path, epsilon)
+        try:
+            transitions = episode(model, path, epsilon)
+        except Exception as e:
+            traceback.print_exc()
+            continue
+
         for transition in transitions:
             replay.push(transition)
 
@@ -130,21 +147,35 @@ def main():
 
         optimizer.zero_grad()
         for _ in range(MINIBATCH):
-            data, action, reward, next_data = replay.sample()
-            y = torch.tensor(reward, dtype=torch.float)
-            if next_data is not None and parameter_updates > TARGET_UPDATE:
-                with torch.no_grad():
-                    y += GAMMA * target(next_data.clone().to('cuda')).max()
+            try:
+                data, action, reward, next_data = replay.sample()
+                y = torch.tensor(reward, dtype=torch.float)
+                if next_data is not None and parameter_updates > TARGET_UPDATE:
+                    with torch.no_grad():
+                        y += GAMMA * target(next_data.clone().to('cuda')).max()
 
-            data = data.clone().to('cuda')
-            q = model(data)
-            loss = smooth_l1_loss(q[action], y.to('cuda'))
-            loss.backward()
-            examples += 1
-            writer.add_histogram('Q', q, examples)
-            writer.add_scalar('loss', loss, examples)
+                data = data.clone().to('cuda')
+                q = model(data)
+                loss = mse_loss(q[action], y.to('cuda'))
+                loss = torch.clamp(loss, min=0.0, max=1.0)
+                loss.backward()
+                writer.add_histogram(
+                    'Q',
+                    torch.clamp(q, min=-1.0, max=1.0),
+                    examples
+                )
+                writer.add_scalar('loss', loss, examples)
+                examples += 1
 
+                del q, loss
+                gc.collect()
+                torch.cuda.empty_cache()
+            # CUDA OOM, probably
+            except RuntimeError:
+                traceback.print_exc()
+                continue
         optimizer.step()
+
         parameter_updates += 1
         if parameter_updates % TARGET_UPDATE == 0:
             torch.save(model.state_dict(), 'model.pt')

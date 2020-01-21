@@ -1,7 +1,9 @@
-import clauses
+import time
 import subprocess
 
-VAMPIRE_STARTUP = 42.7E6
+import clauses
+
+VAMPIRE_STARTUP = 4e7
 
 class Crashed(Exception):
     pass
@@ -15,10 +17,17 @@ class Timeout(Exception):
 def clausify(path, timeout=1.0):
     clausify = subprocess.Popen([
         'vampire',
+        '-t', '1',
         '--mode', 'clausify',
         path,
     ], stdout=subprocess.PIPE)
-    clause_ascii, _ = clausify.communicate(timeout=timeout)
+    try:
+        clause_ascii, _ = clausify.communicate(timeout=timeout)
+    except subprocess.CalledProcessError:
+        raise Timeout()
+    except subprocess.TimeoutExpired:
+        raise Timeout()
+
     return clauses.parse(clause_ascii)
 
 def score(clauses, timeout=1.0):
@@ -32,10 +41,16 @@ def score(clauses, timeout=1.0):
             '-av', 'off',
             '-sa',  'discount'
         ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        _, stderr = proc.communicate(input=b''.join(clauses), timeout=timeout)
+        # subprocess communicate() not reliable for grandchild procs
+        proc.stdin.write(b''.join(clauses))
+        proc.stdin.close()
+        proc.wait(timeout)
+        stderr = proc.stderr.read()
     except subprocess.CalledProcessError:
         raise Crashed()
     except subprocess.TimeoutExpired:
+        proc.terminate()
+        proc.kill()
         raise Timeout()
 
     try:
@@ -51,13 +66,14 @@ def infer(existing):
     try:
         output = subprocess.check_output([
             'vampire',
+            '-t', '1',
             '-av', 'off',
             '-sa',  'discount',
             '-awr', '1:0',
             '--max_age', '1'
         ], input=b''.join(existing))
     except subprocess.CalledProcessError:
-        raise Crashed()
+        raise Timeout()
     except subprocess.TimeoutExpired:
         raise Timeout()
 

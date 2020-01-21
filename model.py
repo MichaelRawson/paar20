@@ -1,11 +1,15 @@
 import torch
 from torch.nn import Linear, Module, ModuleList
 from torch.nn.functional import relu
+from torch.utils.checkpoint import checkpoint
 from torch_geometric import nn as geom
 from torch_geometric.utils import degree
 
 LAYERS = 32
 K = 8
+
+def cat(x):
+    return torch.cat(x, dim=1)
 
 class GCNConv(geom.MessagePassing):
     def __init__(self, in_channels, out_channels, **kwargs):
@@ -51,7 +55,7 @@ class ConvLayer(Module):
         x = relu(x)
         in_x = self.conv_in(x, edge_index)
         out_x = self.conv_out(x, edge_index)
-        x = torch.cat((in_x, out_x), dim=1)
+        x = cat((in_x, out_x))
         return x
 
 class DenseBlock(Module):
@@ -67,14 +71,14 @@ class DenseBlock(Module):
         ])
 
     def forward(self, x, edge_index):
-        outputs = [x]
+        inputs = [x]
         for conv, fc in zip(self.conv, self.fc):
-            combined = torch.cat(outputs, dim=1)
+            combined = checkpoint(cat, inputs, preserve_rng_state=False)
             x = fc(combined)
             x = conv(x, edge_index)
-            outputs.append(x)
+            inputs.append(x)
 
-        return torch.cat(outputs, dim=1)
+        return cat(inputs[1:])
 
 class Q(Module):
     def __init__(self, features):
@@ -90,7 +94,7 @@ class Model(Module):
         super().__init__()
         self.input = Linear(11, 2 * K, bias=False)
         self.dense = DenseBlock(LAYERS)
-        self.q = Q(2 * K * (LAYERS + 1))
+        self.q = Q(2 * K * LAYERS)
 
     def forward(self, data):
         x = data.x
