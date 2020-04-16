@@ -2,12 +2,11 @@ use numpy::{PyArray, PyArray1};
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::Directed;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList};
 use std::collections::HashMap;
-use tptp::parsers::{cnf_annotated, tptp_input_iterator};
+use tptp::parsers::{cnf_annotated, TPTPIterator};
 use tptp::syntax::*;
+use tptp::visitor::Visitor;
 
-#[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum NodeType {
     Variable,
@@ -19,8 +18,8 @@ pub enum NodeType {
     Negation,
     Axiom,
     NegatedConjecture,
-    Action,
     Selected,
+    Action,
 }
 
 #[derive(Default)]
@@ -49,41 +48,34 @@ impl GraphBuilder {
         self.stack.last_mut().unwrap().push(child);
     }
 
-    fn visit(&mut self, annotated: CnfAnnotated, selected: bool) {
-        self.visit_cnf_annotated(annotated);
-        let clause = self.last();
-        let node = self.graph.add_node(if selected {
-            NodeType::Selected
-        } else {
-            NodeType::Action
-        });
-        self.graph.add_edge(node, clause, ());
-        self.record(node);
+    fn visit(&mut self, cnf: CnfAnnotated) -> NodeIndex {
+        self.visit_cnf_annotated(cnf);
+        self.last()
     }
 
-    fn finish(mut self) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>) {
-        let nodes = self.graph
-            .raw_nodes()
-            .into_iter()
-            .map(|n| n.weight as i32)
-            .collect();
+    fn finish(mut self) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+        for node_index in self.graph.node_indices() {
+            self.graph.add_edge(node_index, node_index, ());
+        }
 
-        let (sources, targets) = self.graph
+        let nodes = self
+            .graph
+            .raw_nodes()
+            .iter()
+            .map(|n| n.weight as i64)
+            .collect();
+        let (sources, targets) = self
+            .graph
             .raw_edges()
-            .into_iter()
-            .map(|e| (e.source().index() as i32, e.target().index() as i32))
+            .iter()
+            .map(|e| (e.source().index() as i64, e.target().index() as i64))
             .unzip();
 
-        let indices = self.stack.pop().unwrap()
-            .into_iter()
-            .map(|n| n.index() as i32)
-            .collect();
-
-        (nodes, sources, targets, indices)
+        (nodes, sources, targets)
     }
 }
 
-impl Visitor for GraphBuilder {
+impl<'v> Visitor<'v> for GraphBuilder {
     fn visit_variable(&mut self, variable: Variable) {
         let key = format!("{}", variable);
         let variables = &mut self.variables;
@@ -107,7 +99,7 @@ impl Visitor for GraphBuilder {
     fn visit_fof_plain_term(&mut self, term: FofPlainTerm) {
         use FofPlainTerm::*;
         match term {
-            Constant(functor) => self.visit_functor(functor),
+            Constant(constant) => self.visit_constant(constant),
             Function(functor, arguments) => {
                 self.level();
                 self.visit_functor(functor);
@@ -196,55 +188,60 @@ impl Visitor for GraphBuilder {
 
 #[pymodule]
 fn clauses(_py: Python, module: &PyModule) -> PyResult<()> {
+    type LongTensor = PyArray1<i64>;
+
     #[pyfn(module, "parse")]
-    fn parse<'p>(py: Python<'p>, byte_object: &PyBytes) -> PyResult<Vec<&'p PyBytes>> {
-        let bytes = byte_object.as_bytes();
+    fn parse(bytes: &[u8]) -> PyResult<Vec<(bool, String)>> {
         let mut parsed = vec![];
-        let mut parser = tptp_input_iterator::<()>(bytes);
+        let mut parser = TPTPIterator::<()>::new(bytes);
         for input in &mut parser {
-            parsed.push(PyBytes::new(py, format!("{}", input).as_ref()));
+            let input = input.expect("parse error");
+            if let TPTPInput::Annotated(input) = input {
+                if let AnnotatedFormula::Cnf(cnf_annotated) = *input {
+                    let is_conjecture = cnf_annotated.role == FormulaRole::NegatedConjecture;
+                    parsed.push((is_conjecture, format!("{}", cnf_annotated.formula)));
+                }
+            }
         }
-        if !parser.finish().is_ok() {
-            Err(pyo3::exceptions::SyntaxError::py_err(""))
-        } else {
-            Ok(parsed)
-        }
+        Ok(parsed)
     }
 
     #[pyfn(module, "graph")]
-    fn graph<'p>(py: Python<'p>, selected_list: &PyList, action_list: &PyList) -> PyResult<(&'p PyArray1<i32>, &'p PyArray1<i32>, &'p PyArray1<i32>, &'p PyArray1<i32>)> {
-        let mut selected_clauses: Vec<&PyBytes> = vec![];
-        for object in selected_list {
-            selected_clauses.push(object.extract()?);
-        }
-        let mut action_clauses: Vec<&PyBytes> = vec![];
-        for object in action_list {
-            action_clauses.push(object.extract()?);
-        }
-
+    fn graph<'p>(
+        py: Python<'p>,
+        selected: Vec<&[u8]>,
+        actions: Vec<&[u8]>,
+    ) -> PyResult<(
+        &'p LongTensor,
+        &'p LongTensor,
+        &'p LongTensor,
+        &'p LongTensor,
+    )> {
         let mut builder = GraphBuilder::default();
         builder.level();
-        for clause in selected_clauses {
-            if let Ok((_, clause)) = cnf_annotated::<()>(clause.as_bytes()) {
-                builder.visit(clause, true);
-            } else {
-                return Err(pyo3::exceptions::SyntaxError::py_err(""));
-            }
-        }
-        for clause in action_clauses {
-            if let Ok((_, clause)) = cnf_annotated::<()>(clause.as_bytes()) {
-                builder.visit(clause, false);
-            } else {
-                return Err(pyo3::exceptions::SyntaxError::py_err(""));
-            }
+
+        for clause in selected {
+            let (_, clause) = cnf_annotated::<()>(clause).expect("parse error");
+            let index = builder.visit(clause);
+            let selected_node = builder.graph.add_node(NodeType::Selected);
+            builder.graph.add_edge(selected_node, index, ());
         }
 
-        let (nodes, sources, targets, clauses) = builder.finish();
+        let mut action_indices = vec![];
+        for clause in actions {
+            let (_, clause) = cnf_annotated::<()>(clause).expect("parse error");
+            let index = builder.visit(clause);
+            let action_node = builder.graph.add_node(NodeType::Action);
+            builder.graph.add_edge(action_node, index, ());
+            action_indices.push(action_node.index() as i64)
+        }
+
+        let (nodes, sources, targets) = builder.finish();
         let nodes = PyArray::from_vec(py, nodes);
         let sources = PyArray::from_vec(py, sources);
         let targets = PyArray::from_vec(py, targets);
-        let clauses = PyArray::from_vec(py, clauses);
-        Ok((nodes, sources, targets, clauses))
+        let action_indices = PyArray::from_vec(py, action_indices);
+        Ok((nodes, sources, targets, action_indices))
     }
 
     Ok(())

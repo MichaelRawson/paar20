@@ -1,189 +1,53 @@
-import gc
-from glob import glob
-import traceback
-import random
-import warnings
+from loader import loader
+from model import Model
 
 import torch
-from torch.nn.functional import mse_loss
-from torch.optim import RMSprop
+from torch.optim import SGD
 from torch.utils.tensorboard import SummaryWriter
-from torch_geometric.data import Data
-from torch_geometric.utils import add_self_loops
 
-from atp import Crashed, Timeout, ProvedIt
-from environment import Environment
-from model import Model
-from replay import Replay
+LR = 0.001
+MOMENTUM = 0.9
+WEIGHT_DECAY = 1e-4
 
-MAX_EPISODE_LENGTH = 10
-GAMMA = 0.99
-MAX_EPSILON = 1.0
-MIN_EPSILON = 0.1
-EPSILON_DECAY = 0.9995
-REPLAY_SIZE = 50000
-MIN_REPLAY = 256
-TARGET_UPDATE = 1000
-
-MINIBATCH = 32
-LR = 5e-4
-ALPHA = 0.95
-
-def preprocess(env):
-    nodes, sources, models, clauses = env.transform()
-    x = torch.eye(11, dtype=torch.float)[nodes]
-    edge_index = add_self_loops(
-        torch.tensor([sources, models], dtype=torch.long),
-        num_nodes = len(nodes)
-    )[0]
-    action_index = torch.tensor(clauses[-len(env.actions):], dtype=torch.long)
-
-    data = Data(x=x, edge_index=edge_index)
-    data.action_index = action_index
-    return data
-
-def episode(model, path, epsilon):
-    print(path)
-    try:
-        env = Environment(path)
-    except (Timeout, ProvedIt, Crashed):
-        print("skipped")
-        return []
-
-    data = preprocess(env)
-    terminal = False
-    total = 0
-    transitions = []
-
-    for t in range(MAX_EPISODE_LENGTH):
-        # shouldn't happen, very occasionally does (??)
-        if len(env.actions) == 0:
-            break
-
-        if random.random() < epsilon:
-            action = random.randint(0, len(env.actions) - 1)
-        else:
-            with torch.no_grad():
-                action = model(data.clone().to('cuda')).argmax().item()
-
-        try:
-            reward = env.perform_action(action)
-        except Timeout:
-            reward = -1 - total
-            terminal = True
-        except ProvedIt:
-            reward = 1 - total
-            terminal = True
-        except Crashed:
-            print("crashed")
-            return []
-
-        if total + reward <= -1.0:
-            reward = -1 - total
-            terminal = True
-
-        if t == MAX_EPISODE_LENGTH - 1:
-            terminal = True
-
-        total += reward
-        if terminal:
-            next_data = None
-        else:
-            next_data = preprocess(env)
-
-        transition = (data, action, reward, next_data)
-        transitions.append(transition)
-        data = next_data
-        if terminal:
-            break
-
-    return transitions
-
-def main():
-    paths = open('GRP.txt').read().split('\n')
-
-    model = Model().to('cuda')
-    model.train()
-    target = Model().to('cuda')
-    target.eval()
-    warnings.filterwarnings("ignore", message="None of the inputs have requires_grad=True. Gradients will be None")
-
-    epsilon = MAX_EPSILON
-    optimizer = RMSprop(model.parameters(), lr=LR, alpha=ALPHA)
-    replay = Replay(REPLAY_SIZE)
-    writer = SummaryWriter()
-
-    episodes = 0
-    examples = 0
-    parameter_updates = 0
-
-    print("start")
-    while True:
-        path = random.choice(paths)
-        try:
-            transitions = episode(model, path, epsilon)
-        except Exception as e:
-            traceback.print_exc()
-            continue
-
-        for transition in transitions:
-            replay.push(transition)
-
-        if len(transitions) > 0:
-            episodes += 1
-            _, _, rewards, _ = zip(*transitions)
-            writer.add_scalar('reward', sum(rewards), episodes)
-
-        if len(replay) < MIN_REPLAY:
-            continue
-
-        for name, parameter in model.named_parameters():
-            if parameter.requires_grad:
-                writer.add_histogram(
-                    name.replace('.', '/'),
-                    parameter.data,
-                    parameter_updates
-                )
-
+def epoch(writer, model, optimizer, steps):
+    for batch in loader('data/GRP001-1/*.pt'):
         optimizer.zero_grad()
-        for _ in range(MINIBATCH):
-            try:
-                data, action, reward, next_data = replay.sample()
-                y = torch.tensor(reward, dtype=torch.float)
-                if next_data is not None and parameter_updates > TARGET_UPDATE:
-                    with torch.no_grad():
-                        y += GAMMA * target(next_data.clone().to('cuda')).max()
-
-                data = data.clone().to('cuda')
-                q = model(data)
-                loss = mse_loss(q[action], y.to('cuda'))
-                loss = torch.clamp(loss, min=0.0, max=1.0)
-                loss.backward()
-                writer.add_histogram(
-                    'Q',
-                    torch.clamp(q, min=-1.0, max=1.0),
-                    examples
-                )
-                writer.add_scalar('loss', loss, examples)
-                examples += 1
-
-                del q, loss
-                gc.collect()
-                torch.cuda.empty_cache()
-            # CUDA OOM, probably
-            except RuntimeError:
-                traceback.print_exc()
-                continue
+        num_examples, assignment, nodes, adjacency, adjacency_t, indices, y = batch
+        log_predictions = model(
+            num_examples,
+            assignment,
+            nodes,
+            adjacency,
+            adjacency_t,
+            indices
+        )
+        error = -(y * log_predictions).mean()
+        loss = num_examples * error
+        loss.backward()
         optimizer.step()
 
-        parameter_updates += 1
-        if parameter_updates % TARGET_UPDATE == 0:
-            torch.save(model.state_dict(), 'model.pt')
-            target.load_state_dict(model.state_dict())
+        steps += 1
+        writer.add_scalar('loss/X-entropy', error, steps)
+        if steps % 100 == 0:
+            writer.add_histogram('predicted', log_predictions.exp(), steps)
+            writer.add_histogram('actual', y, steps)
+            writer.add_histogram('error', log_predictions.exp() - y, steps)
+    return steps
 
-        epsilon *= EPSILON_DECAY
-        epsilon = max(MIN_EPSILON, epsilon)
-        gc.collect()
+def train():
+    writer = SummaryWriter()
+    model = Model().to('cuda')
+    optimizer = SGD(
+        model.parameters(),
+        lr=LR,
+        momentum=MOMENTUM,
+        weight_decay=WEIGHT_DECAY,
+        nesterov=True
+    )
+    steps = 0
+    while True:
+        steps = epoch(writer, model, optimizer, steps)
+        torch.save(model.state_dict(), 'data/model.pt')
 
 if __name__ == '__main__':
-    main()
+    train()

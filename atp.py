@@ -1,9 +1,9 @@
-import time
 import subprocess
-
 import clauses
 
+VAMPIRE = 'vampire'
 VAMPIRE_STARTUP = 4e7
+TIMEOUT = 1.0
 
 class Crashed(Exception):
     pass
@@ -14,40 +14,56 @@ class ProvedIt(Exception):
 class Timeout(Exception):
     pass
 
-def clausify(path, timeout=1.0):
-    clausify = subprocess.Popen([
-        'vampire',
-        '-t', '1',
-        '--mode', 'clausify',
-        path,
-    ], stdout=subprocess.PIPE)
+def tptp_clause(is_conjecture, clause):
+    role = "negated_conjecture" if is_conjecture else "axiom"
+    return f"cnf(c, {role}, {clause}).\n".encode('ascii')
+
+def clausify(path):
     try:
-        clause_ascii, _ = clausify.communicate(timeout=timeout)
-    except subprocess.CalledProcessError:
-        raise Timeout()
+        tptp_bytes = subprocess.check_output([
+            VAMPIRE,
+            '--mode', 'clausify',
+            path
+        ], timeout=1.0)
     except subprocess.TimeoutExpired:
         raise Timeout()
 
-    return clauses.parse(clause_ascii)
+    parsed = clauses.parse(tptp_bytes)
+    axioms = []
+    conjectures = []
+    for is_conjecture, clause in parsed:
+        if is_conjecture:
+            conjectures.append((is_conjecture, clause))
+        else:
+            axioms.append((is_conjecture, clause))
+    return axioms, conjectures
 
-def score(clauses, timeout=1.0):
+def score(axioms, selected):
     try:
         proc = subprocess.Popen([
             'perf', 'stat',
             '-e', 'instructions:u',
             '-x', ',',
-            'vampire',
+            VAMPIRE,
+            '-t', str(TIMEOUT),
             '-p', 'off',
             '-av', 'off',
             '-sa',  'discount'
-        ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        # subprocess communicate() not reliable for grandchild procs
-        proc.stdin.write(b''.join(clauses))
+        ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE
+        )
+        for is_conjecture, clause in reversed(selected):
+            proc.stdin.write(tptp_clause(is_conjecture, clause))
+        for is_conjecture, clause in reversed(axioms):
+            assert not is_conjecture
+            proc.stdin.write(tptp_clause(is_conjecture, clause))
         proc.stdin.close()
-        proc.wait(timeout)
+        proc.wait(TIMEOUT)
+        if proc.returncode != 0:
+            raise Crashed()
         stderr = proc.stderr.read()
-    except subprocess.CalledProcessError:
-        raise Crashed()
     except subprocess.TimeoutExpired:
         proc.terminate()
         proc.kill()
@@ -58,30 +74,38 @@ def score(clauses, timeout=1.0):
     except ValueError:
         raise Crashed()
 
-def strip_prefix(clause):
-    return clause.split(b',', 2)[2]
-
-def infer(existing):
-    existing_formulae = set(strip_prefix(clause) for clause in existing)
+def infer(selected):
+    existing = set(selected)
     try:
-        output = subprocess.check_output([
-            'vampire',
-            '-t', '1',
+        proc = subprocess.Popen([
+            VAMPIRE,
             '-av', 'off',
             '-sa',  'discount',
-            '-awr', '1:0',
             '--max_age', '1'
-        ], input=b''.join(existing))
-    except subprocess.CalledProcessError:
-        raise Timeout()
+        ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL
+        )
+        for is_conjecture, clause in reversed(selected):
+            proc.stdin.write(tptp_clause(is_conjecture, clause))
+
+        proc.stdin.close()
+        proc.wait(TIMEOUT)
+        if proc.returncode != 0:
+            raise Crashed()
+        tptp_bytes = proc.stdout.read()
     except subprocess.TimeoutExpired:
+        proc.terminate()
+        proc.kill()
         raise Timeout()
 
-    if b'% SZS status Unsatisfiable' in output:
+    if b"SZS status Unsatisfiable" in tptp_bytes:
         raise ProvedIt()
 
-    saturated = clauses.parse(output)
-    return [
-        sat for sat in saturated if
-        strip_prefix(sat) not in existing_formulae
+    parsed = clauses.parse(tptp_bytes)
+    inferred = [
+        inference for inference in parsed
+        if not inference in existing
     ]
+    return inferred

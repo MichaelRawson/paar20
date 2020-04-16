@@ -9,12 +9,13 @@ name = "clauses"
 crate-type = ["cdylib"]
 
 [dependencies]
-numpy = "0.7"
+nom = "5"
+numpy = "0.8"
 petgraph = "0.5"
-tptp = "0.14"
+tptp = "0.20"
 
 [dependencies.pyo3]
-version = "0.8"
+version = "0.9"
 features = ["extension-module"]
 
 [profile.release]
