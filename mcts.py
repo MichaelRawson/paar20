@@ -1,11 +1,10 @@
 import atp
 import clauses
-from data import save
 
 from concurrent.futures import ThreadPoolExecutor
 import math
 
-STEPS = 10000
+ALPHA = 0.95
 
 def select_inference(axioms, selected, inference):
     new_axioms = [axiom for axiom in axioms if axiom != inference]
@@ -26,18 +25,18 @@ class Node:
         self.closed = False
         self.children = None
         try:
-            self.raw_score = atp.score(axioms, selected)
+            self.raw_score = self.baseline - atp.score(axioms, selected)
             self.inferences = axioms + atp.infer(selected)
         except (atp.Crashed, atp.Timeout) as _:
-            self.raw_score = 10 * baseline
+            self.raw_score = -baseline
             self.closed = True
         except atp.ProvedIt:
-            self.raw_score = 0
+            self.raw_score = self.baseline
             self.closed = True
 
     @property
     def score(self):
-        return (self.baseline - self.raw_score) / self.baseline
+        return self.raw_score / self.baseline
 
     def select_child(self):
         assert not self.closed
@@ -56,18 +55,18 @@ class Node:
                 selected,
                 inference
             )
-            return Node(self.raw_score, new_axioms, new_selected)
+            return Node(self.baseline, new_axioms, new_selected)
         self.children = list(Node.executor.map(new_child, self.inferences))
         if not self.children:
             self.closed = True
 
     def update(self):
         assert self.children is not None
-        self.visits = sum(child.visits for child in self.children) + 1
-        self.raw_score = min(
-            self.raw_score,
-            min(child.raw_score for child in self.children)
-        )
+        self.visits = sum(child.visits for child in self.children)
+        self.raw_score = ALPHA * sum(
+            child.visits * child.raw_score
+            for child in self.children
+        ) / self.visits
         self.closed = all(child.closed for child in self.children)
 
     def step(self, axioms, selected):
@@ -80,6 +79,7 @@ class Node:
         self.update()
 
     def save_graphs(self, save_to, axioms, selected):
+        import graphs
         if self.children is None or self.children == []:
             return
         nodes, sources, targets, indices = clauses.graph(
@@ -87,7 +87,7 @@ class Node:
             [atp.tptp_clause(*clause) for clause in self.inferences],
         )
         y = [child.score for child in self.children]
-        save(save_to, nodes, sources, targets, indices, y)
+        graphs.save(save_to, nodes, sources, targets, indices, y)
         for inference, child in zip(self.inferences, self.children):
             child_axioms, child_selected = select_inference(
                 axioms,
@@ -95,20 +95,3 @@ class Node:
                 inference
             )
             child.save_graphs(save_to, child_axioms, child_selected)
-
-if __name__ == '__main__':
-    from pathlib import Path
-    import sys
-    path = Path(sys.argv[1])
-    axioms, selected = atp.clausify(path)
-    baseline = atp.score(axioms, selected)
-    root = Node(baseline, axioms, selected)
-    for _ in range(STEPS):
-        if root.closed:
-            break
-        root.step(axioms, selected)
-        for child in root.children:
-            print(f"{child.score:.3f}/{child.visits}", end='  ')
-        print()
-    save_to = f"data/{path.stem}"
-    root.save_graphs(save_to, axioms, selected)

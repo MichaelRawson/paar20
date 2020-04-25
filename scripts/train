@@ -1,4 +1,8 @@
-from loader import loader
+#!/usr/bin/env python3
+import sys
+sys.path.append('.')
+
+from graphs import loader
 from model import Model
 
 import torch

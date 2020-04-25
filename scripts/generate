@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+import sys
+sys.path.append('.')
+import atp
+from mcts import Node
+
+STEPS = 1000
+
+if __name__ == '__main__':
+    from pathlib import Path
+    import sys
+    path = Path(sys.argv[1])
+    axioms, selected = atp.clausify(path)
+    baseline = atp.score(axioms, selected)
+    root = Node(baseline, axioms, selected)
+    for _ in range(STEPS):
+        if root.closed:
+            break
+        root.step(axioms, selected)
+        for child in root.children:
+            pass
+            print(f"{child.score:.3f}/{child.visits}", end='  ')
+        print()
+    save_to = f"data/{path.stem}"
+    root.save_graphs(save_to, axioms, selected)

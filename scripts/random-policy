@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+import atp
+from explore import select_inference
+from pathlib import Path
+
+def random_policy():
+    pass
+
+if __name__ == '__main__':
+    import sys
+    path = Path(sys.argv[1])
+
