@@ -4,7 +4,7 @@ import clauses
 from concurrent.futures import ThreadPoolExecutor
 import math
 
-ALPHA = 0.95
+ALPHA = 0.99
 
 def select_inference(axioms, selected, inference):
     new_axioms = [axiom for axiom in axioms if axiom != inference]
@@ -14,7 +14,7 @@ def select_inference(axioms, selected, inference):
 def uct(parent, child):
     if child.closed:
         return float('-inf')
-    return child.score + math.sqrt(2 * math.log(parent.visits) / child.visits)
+    return child.score + math.sqrt(math.log(parent.visits) / child.visits)
 
 class Node:
     executor = ThreadPoolExecutor(4)
@@ -62,14 +62,14 @@ class Node:
 
     def update(self):
         assert self.children is not None
-        self.visits = sum(child.visits for child in self.children)
-        self.raw_score = ALPHA * sum(
-            child.visits * child.raw_score
+        self.raw_score = ALPHA * max(
+            child.raw_score
             for child in self.children
-        ) / self.visits
+        )
         self.closed = all(child.closed for child in self.children)
 
     def step(self, axioms, selected):
+        self.visits += 1
         if self.children is None:
             self.expand(axioms, selected)
         else:

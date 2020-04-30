@@ -24,7 +24,7 @@ def clausify(path):
             VAMPIRE,
             '--mode', 'clausify',
             path
-        ], timeout=1.0)
+        ], timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         raise Timeout()
 
@@ -60,7 +60,7 @@ def score(axioms, selected):
             assert not is_conjecture
             proc.stdin.write(tptp_clause(is_conjecture, clause))
         proc.stdin.close()
-        proc.wait(TIMEOUT)
+        proc.wait(2 * TIMEOUT)
         if proc.returncode != 0:
             raise Crashed()
         stderr = proc.stderr.read()
@@ -91,7 +91,7 @@ def infer(selected):
             proc.stdin.write(tptp_clause(is_conjecture, clause))
 
         proc.stdin.close()
-        proc.wait(TIMEOUT)
+        proc.wait(2 * TIMEOUT)
         if proc.returncode != 0:
             raise Crashed()
         tptp_bytes = proc.stdout.read()

@@ -1,49 +1,73 @@
+#!/usr/bin/env python3
+import sys
+sys.path.append('.')
 import atp
 import clauses
-from data import normalised_adjacencies
 from model import Model
+from graphs import normalised_adjacencies
+from mcts import select_inference
 
-import math
-from queue import PriorityQueue
+import random
+from pathlib import Path
 import torch
 
-def select_inference(axioms, selected, inference):
-    new_axioms = [axiom for axiom in axioms if axiom != inference]
-    new_selected = selected + [inference]
-    return new_axioms, new_selected
+EPISODE_LENGTH = 50
 
-def mk_inputs(selected, inferences):
+def mk_input(selected, actions):
     nodes, sources, targets, indices = clauses.graph(
         [atp.tptp_clause(*clause) for clause in selected],
-        [atp.tptp_clause(*clause) for clause in inferences],
+        [atp.tptp_clause(*clause) for clause in actions],
     )
     nodes = torch.tensor(nodes)
     sources = torch.tensor(sources)
     targets = torch.tensor(targets)
     indices = torch.tensor(indices)
-    edge_index, edge_weight_t, edge_index_t, edge_weight = normalised_adjacencies(nodes, sources, targets)
+    edge_index, edge_weight, edge_index_t, edge_weight_t =\
+            normalised_adjacencies(nodes, sources, targets)
     adjacency = torch.sparse.FloatTensor(edge_index, edge_weight)
     adjacency_t = torch.sparse.FloatTensor(edge_index_t, edge_weight_t)
-    assignment = torch.zeros(nodes.shape)
-    return (1, assignment.to('cuda'), nodes.to('cuda'), adjacency.to('cuda'), adjacency_t.to('cuda'), indices.to('cuda'))
+    return (
+        nodes.to('cuda'),
+        adjacency.to('cuda'),
+        adjacency_t.to('cuda'),
+        indices.to('cuda')
+    )
+
+def model_policy(model, axioms, conjectures):
+    axioms = axioms[:]
+    conjectures = conjectures[:]
+    selected = conjectures
+    for _ in range(EPISODE_LENGTH):
+        actions = axioms + atp.infer(selected)
+        with torch.no_grad():
+            weights = model(*mk_input(selected, actions)).tolist()
+        chosen = random.choices(
+            population=actions,
+            weights=weights,
+            k=1
+        )[0]
+        axioms, selected = select_inference(axioms, selected, chosen)
+    return atp.score(axioms, selected)
 
 if __name__ == '__main__':
-    from pathlib import Path
+    model = Model().to('cuda')
+    model.load_state_dict(torch.load('data/model.pt'))
+    model.eval()
     import sys
     path = Path(sys.argv[1])
-    model = Model().to('cuda')
-    model.load_state_dict(torch.load('data/GRP001-1.pt'))
-    model.eval()
-    axioms, selected = atp.clausify(path)
-    queue = PriorityQueue()
-    queue.put((-1.0, axioms, selected))
-    while not queue.empty():
-        negative_prob, axioms, selected = queue.get()
-        prob = -negative_prob
-        inferences = axioms + atp.infer(selected)
-        with torch.no_grad():
-            logits = model(*mk_inputs(selected, inferences))
-        negative_probs = negative_prob * torch.softmax(logits, dim=0)
-        for negative_prob, inference in zip(negative_probs, inferences):
-            new_axioms, new_selected = select_inference(axioms, selected, inference)
-            queue.put((negative_prob, new_axioms, new_selected))
+    axioms, conjectures = atp.clausify(path)
+    baseline = atp.score(axioms, conjectures)
+    model_policy(model, axioms, conjectures)
+    for _ in range(1000):
+        while True:
+            try:
+                raw = model_policy(model, axioms, conjectures)
+                score = raw / baseline
+                print(score)
+            except atp.Timeout:
+                continue
+            except atp.Crashed:
+                continue
+            except atp.ProvedIt:
+                print("0.0")
+            break

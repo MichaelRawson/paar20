@@ -1,6 +1,6 @@
 import torch
 from torch.nn import BatchNorm1d, Embedding, Linear, Module, ModuleList, Parameter
-from torch.nn.functional import log_softmax, relu
+from torch.nn.functional import softmax, relu
 from torch.nn.init import xavier_normal_
 
 NODE_TYPES = 11
@@ -57,19 +57,12 @@ class Model(Module):
         self.hidden = Linear(CHANNELS, HIDDEN_LAYER)
         self.output = Linear(HIDDEN_LAYER, 1)
 
-    def forward(self, num_examples, assignment, nodes, adjacency, adjacency_t, indices):
+    def forward(self, nodes, adjacency, adjacency_t, indices):
         nodes = self.embedding(nodes)
         nodes = self.conv0(nodes, adjacency, adjacency_t)
         for res in self.res:
             nodes = res(nodes, adjacency, adjacency_t)
-
-        def final(nodes):
-            nodes = self.hidden(relu(nodes))
-            nodes = self.output(relu(nodes)).squeeze()
-            return log_softmax(nodes, dim=0)
-
-        outputs = torch.cat([
-            final(nodes[indices[assignment[indices] == item]])
-            for item in range(num_examples)
-        ], dim=0)
-        return outputs
+        nodes = self.hidden(relu(nodes))
+        nodes = self.output(relu(nodes)).squeeze()
+        nodes = nodes[indices]
+        return softmax(nodes, dim=0)

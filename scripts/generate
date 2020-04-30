@@ -3,8 +3,9 @@ import sys
 sys.path.append('.')
 import atp
 from mcts import Node
+from time import monotonic
 
-STEPS = 1000
+TIME_LIMIT = 600
 
 if __name__ == '__main__':
     from pathlib import Path
@@ -13,7 +14,8 @@ if __name__ == '__main__':
     axioms, selected = atp.clausify(path)
     baseline = atp.score(axioms, selected)
     root = Node(baseline, axioms, selected)
-    for _ in range(STEPS):
+    start = monotonic()
+    while monotonic() - start < TIME_LIMIT:
         if root.closed:
             break
         root.step(axioms, selected)
@@ -21,5 +23,6 @@ if __name__ == '__main__':
             pass
             print(f"{child.score:.3f}/{child.visits}", end='  ')
         print()
-    save_to = f"data/{path.stem}"
+    save_to = Path(f"data/{path.stem}")
+    save_to.mkdir(exist_ok=True)
     root.save_graphs(save_to, axioms, selected)

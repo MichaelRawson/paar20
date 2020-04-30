@@ -6,36 +6,37 @@ from graphs import loader
 from model import Model
 
 import torch
+from torch.nn.functional import log_softmax, kl_div, softmax
 from torch.optim import SGD
 from torch.utils.tensorboard import SummaryWriter
 
-LR = 0.001
+BATCH_SIZE = 32
+LR = 0.0001
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
+TEMPERATURE = 5
 
 def epoch(writer, model, optimizer, steps):
-    for batch in loader('data/GRP001-1/*.pt'):
-        optimizer.zero_grad()
-        num_examples, assignment, nodes, adjacency, adjacency_t, indices, y = batch
-        log_predictions = model(
-            num_examples,
-            assignment,
-            nodes,
-            adjacency,
-            adjacency_t,
-            indices
+    optimizer.zero_grad()
+    for nodes, adjacency, adjacency_t, indices, y in loader(
+        'data/GRP001-1/*.pt'
+    ):
+        log_real = log_softmax(TEMPERATURE * y, dim=0)
+        approximation = model(nodes, adjacency, adjacency_t, indices)
+        loss = kl_div(
+            log_real.unsqueeze(dim=0),
+            approximation.unsqueeze(dim=0),
+            reduction='batchmean'
         )
-        error = -(y * log_predictions).mean()
-        loss = num_examples * error
         loss.backward()
-        optimizer.step()
-
         steps += 1
-        writer.add_scalar('loss/X-entropy', error, steps)
-        if steps % 100 == 0:
-            writer.add_histogram('predicted', log_predictions.exp(), steps)
-            writer.add_histogram('actual', y, steps)
-            writer.add_histogram('error', log_predictions.exp() - y, steps)
+        writer.add_scalar('loss/X-entropy', loss, steps)
+        if steps % BATCH_SIZE == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+
+    optimizer.step()
+    optimizer.zero_grad()
     return steps
 
 def train():
