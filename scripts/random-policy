@@ -7,33 +7,34 @@ import random
 
 from pathlib import Path
 
-EPISODE_LENGTH = 50
+EPISODE_LENGTH = 5
 
-def random_policy(axioms, conjectures):
+def random_policy(axioms, conjectures, extras):
     axioms = axioms[:]
     conjectures = conjectures[:]
+    extras = extras[:]
     selected = conjectures
     for _ in range(EPISODE_LENGTH):
-        actions = axioms + atp.infer(selected)
+        inferred, extras = atp.infer(selected, extras)
+        actions = axioms + inferred
+        if len(actions) == 0:
+            print("out of actions")
+            raise atp.Crashed()
         chosen = random.choice(actions)
+        print(chosen)
         axioms, selected = select_inference(axioms, selected, chosen)
-    return atp.score(axioms, selected)
+    return atp.score(axioms, selected, extras)
 
 if __name__ == '__main__':
     import sys
-    path = Path(sys.argv[1])
-    axioms, conjectures = atp.clausify(path)
-    baseline = atp.score(axioms, conjectures)
+    path = sys.argv[1]
+    axioms, conjectures, extras = atp.clausify(path)
     for _ in range(1000):
-        while True:
-            try:
-                raw = random_policy(axioms, conjectures)
-                score = raw / baseline
-                print(score)
-            except atp.Timeout:
-                continue
-            except atp.Crashed:
-                continue
-            except atp.ProvedIt:
-                print("0.0")
-            break
+        try:
+            print(random_policy(axioms, conjectures, extras))
+        except atp.ProvedIt:
+            print("proved it")
+        except atp.Timeout:
+            print("timeout")
+        except atp.Crashed:
+            print("crashed")

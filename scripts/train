@@ -8,35 +8,40 @@ from model import Model
 import torch
 from torch.nn.functional import log_softmax, kl_div, softmax
 from torch.optim import SGD
+from torch.optim.lr_scheduler import CyclicLR
 from torch.utils.tensorboard import SummaryWriter
 
-BATCH_SIZE = 32
-LR = 0.0001
-MOMENTUM = 0.9
+BATCH_SIZE = 64
+BASE_LR = 1e-4
+MAX_LR = 1e-3
+STEP_SIZE = 10000
 WEIGHT_DECAY = 1e-4
 TEMPERATURE = 5
 
-def epoch(writer, model, optimizer, steps):
+def epoch(writer, model, optimizer, scheduler, steps):
     optimizer.zero_grad()
     for nodes, adjacency, adjacency_t, indices, y in loader(
-        'data/GRP001-1/*.pt'
+        'data/GRP*/*.pt'
     ):
         log_real = log_softmax(TEMPERATURE * y, dim=0)
         approximation = model(nodes, adjacency, adjacency_t, indices)
         loss = kl_div(
-            log_real.unsqueeze(dim=0),
-            approximation.unsqueeze(dim=0),
+            log_real.reshape((-1, 1)),
+            approximation.reshape((-1, 1)),
             reduction='batchmean'
         )
-        loss.backward()
+        (loss / BATCH_SIZE).backward()
         steps += 1
-        writer.add_scalar('loss/X-entropy', loss, steps)
+        writer.add_scalar('train/KL divergence', loss, steps)
         if steps % BATCH_SIZE == 0:
             optimizer.step()
             optimizer.zero_grad()
+            scheduler.step()
+        if steps % (2 * STEP_SIZE) == 0:
+            torch.save(model.state_dict(), 'data/model.pt')
 
     optimizer.step()
-    optimizer.zero_grad()
+    scheduler.step()
     return steps
 
 def train():
@@ -44,15 +49,20 @@ def train():
     model = Model().to('cuda')
     optimizer = SGD(
         model.parameters(),
-        lr=LR,
-        momentum=MOMENTUM,
+        lr=BASE_LR,
+        momentum=0.95,
         weight_decay=WEIGHT_DECAY,
         nesterov=True
     )
+    scheduler = CyclicLR(
+        optimizer,
+        BASE_LR,
+        MAX_LR,
+        step_size_up=STEP_SIZE
+    )
     steps = 0
     while True:
-        steps = epoch(writer, model, optimizer, steps)
-        torch.save(model.state_dict(), 'data/model.pt')
+        steps = epoch(writer, model, optimizer, scheduler, steps)
 
 if __name__ == '__main__':
     train()

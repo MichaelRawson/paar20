@@ -1,9 +1,9 @@
 import subprocess
 import clauses
 
-VAMPIRE = 'vampire'
+VAMPIRE = 'vampire_hol'
 VAMPIRE_STARTUP = 4e7
-TIMEOUT = 1.0
+TIMEOUT = 10.0
 
 class Crashed(Exception):
     pass
@@ -14,9 +14,8 @@ class ProvedIt(Exception):
 class Timeout(Exception):
     pass
 
-def tptp_clause(is_conjecture, clause):
-    role = "negated_conjecture" if is_conjecture else "axiom"
-    return f"cnf(c, {role}, {clause}).\n".encode('ascii')
+def tptp_clause(role, clause):
+    return f"thf(c, {role}, {clause}).\n".encode('ascii')
 
 def clausify(path):
     try:
@@ -28,39 +27,37 @@ def clausify(path):
     except subprocess.TimeoutExpired:
         raise Timeout()
 
-    parsed = clauses.parse(tptp_bytes)
-    axioms = []
-    conjectures = []
-    for is_conjecture, clause in parsed:
-        if is_conjecture:
-            conjectures.append((is_conjecture, clause))
-        else:
-            axioms.append((is_conjecture, clause))
-    return axioms, conjectures
+    axioms, conjectures, extras = clauses.parse(tptp_bytes)
+    axioms = [('axiom', axiom) for axiom in axioms]
+    conjectures = [('negated_conjecture', conjecture) for conjecture in conjectures]
+    extras = [('type', extra) for extra in extras]
+    return axioms, conjectures, extras
 
-def score(axioms, selected):
+def score(axioms, selected, extras):
     try:
         proc = subprocess.Popen([
             'perf', 'stat',
             '-e', 'instructions:u',
             '-x', ',',
             VAMPIRE,
-            '-t', str(TIMEOUT),
+            '-t', str(1.1 * TIMEOUT),
             '-p', 'off',
             '-av', 'off',
-            '-sa',  'discount'
+            '-sa',  'discount',
+            '-csup', 'on'
         ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE
         )
-        for is_conjecture, clause in reversed(selected):
-            proc.stdin.write(tptp_clause(is_conjecture, clause))
-        for is_conjecture, clause in reversed(axioms):
-            assert not is_conjecture
-            proc.stdin.write(tptp_clause(is_conjecture, clause))
+        for role, clause in extras:
+            proc.stdin.write(tptp_clause(role, clause))
+        for role, clause in reversed(selected):
+            proc.stdin.write(tptp_clause(role, clause))
+        for role, clause in reversed(axioms):
+            proc.stdin.write(tptp_clause(role, clause))
         proc.stdin.close()
-        proc.wait(2 * TIMEOUT)
+        proc.wait(TIMEOUT)
         if proc.returncode != 0:
             raise Crashed()
         stderr = proc.stderr.read()
@@ -74,25 +71,30 @@ def score(axioms, selected):
     except ValueError:
         raise Crashed()
 
-def infer(selected):
+def infer(selected, extras):
     existing = set(selected)
     try:
         proc = subprocess.Popen([
             VAMPIRE,
             '-av', 'off',
             '-sa',  'discount',
+            '-csup', 'on',
             '--max_age', '1'
         ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL
+            #stderr=subprocess.DEVNULL
         )
-        for is_conjecture, clause in reversed(selected):
-            proc.stdin.write(tptp_clause(is_conjecture, clause))
+        for role, clause in extras:
+            proc.stdin.write(tptp_clause(role, clause))
+        for role, clause in reversed(selected):
+            proc.stdin.write(tptp_clause(role, clause))
 
         proc.stdin.close()
-        proc.wait(2 * TIMEOUT)
+        proc.wait(1.0)
         if proc.returncode != 0:
+            print(extras)
+            print(proc.stdout.read())
             raise Crashed()
         tptp_bytes = proc.stdout.read()
     except subprocess.TimeoutExpired:
@@ -103,9 +105,13 @@ def infer(selected):
     if b"SZS status Unsatisfiable" in tptp_bytes:
         raise ProvedIt()
 
-    parsed = clauses.parse(tptp_bytes)
+    axioms, conjectures, extras = clauses.parse(tptp_bytes)
+    axioms = [('axiom', axiom) for axiom in axioms]
+    conjectures = [('negated_conjecture', conjecture) for conjecture in conjectures]
+    extras = [('type', extra) for extra in extras]
+
     inferred = [
-        inference for inference in parsed
+        inference for inference in axioms + conjectures
         if not inference in existing
     ]
-    return inferred
+    return inferred, extras

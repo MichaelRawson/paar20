@@ -11,7 +11,7 @@ import random
 from pathlib import Path
 import torch
 
-EPISODE_LENGTH = 50
+EPISODE_LENGTH = 10
 
 def mk_input(selected, actions):
     nodes, sources, targets, indices = clauses.graph(
@@ -39,8 +39,11 @@ def model_policy(model, axioms, conjectures):
     selected = conjectures
     for _ in range(EPISODE_LENGTH):
         actions = axioms + atp.infer(selected)
+        if len(actions) == 0:
+            raise atp.Crashed()
         with torch.no_grad():
-            weights = model(*mk_input(selected, actions)).tolist()
+            weights = torch.softmax(5 * model(*mk_input(selected, actions)), dim=0).reshape((-1)).tolist()
+
         chosen = random.choices(
             population=actions,
             weights=weights,
@@ -51,23 +54,20 @@ def model_policy(model, axioms, conjectures):
 
 if __name__ == '__main__':
     model = Model().to('cuda')
-    model.load_state_dict(torch.load('data/model.pt'))
+    model.load_state_dict(torch.load('data/GRP.pt'))
     model.eval()
+
     import sys
-    path = Path(sys.argv[1])
+    path = sys.argv[1]
     axioms, conjectures = atp.clausify(path)
-    baseline = atp.score(axioms, conjectures)
-    model_policy(model, axioms, conjectures)
     for _ in range(1000):
-        while True:
-            try:
-                raw = model_policy(model, axioms, conjectures)
-                score = raw / baseline
-                print(score)
-            except atp.Timeout:
-                continue
-            except atp.Crashed:
-                continue
-            except atp.ProvedIt:
-                print("0.0")
-            break
+        try:
+            print(model_policy(model, axioms, conjectures))
+        except atp.ProvedIt:
+            print("0.0")
+        except atp.Timeout:
+            print("inf")
+        except atp.Crashed:
+            print("inf")
+        except RuntimeError:
+            print("inf")

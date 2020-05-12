@@ -191,19 +191,42 @@ fn clauses(_py: Python, module: &PyModule) -> PyResult<()> {
     type LongTensor = PyArray1<i64>;
 
     #[pyfn(module, "parse")]
-    fn parse(bytes: &[u8]) -> PyResult<Vec<(bool, String)>> {
-        let mut parsed = vec![];
+    fn parse(bytes: &[u8]) -> PyResult<(Vec<String>, Vec<String>, Vec<String>)> {
+        let mut axioms = vec![];
+        let mut conjectures = vec![];
+        let mut extras = vec![];
         let mut parser = TPTPIterator::<()>::new(bytes);
         for input in &mut parser {
+            if input.is_err() {
+                dbg!("parse error");
+                break;
+            }
             let input = input.expect("parse error");
             if let TPTPInput::Annotated(input) = input {
-                if let AnnotatedFormula::Cnf(cnf_annotated) = *input {
-                    let is_conjecture = cnf_annotated.role == FormulaRole::NegatedConjecture;
-                    parsed.push((is_conjecture, format!("{}", cnf_annotated.formula)));
+                match *input {
+                    AnnotatedFormula::Cnf(cnf_annotated) => {
+                        let formula = format!("{}", cnf_annotated.formula);
+                        if cnf_annotated.role == FormulaRole::NegatedConjecture {
+                            conjectures.push(formula);
+                        } else {
+                            axioms.push(formula);
+                        }
+                    }
+                    AnnotatedFormula::Thf(thf_annotated) => {
+                        let formula = format!("{}", thf_annotated.formula);
+                        if thf_annotated.role == FormulaRole::NegatedConjecture {
+                            conjectures.push(formula);
+                        } else if thf_annotated.role == FormulaRole::Type {
+                            extras.push(formula);
+                        } else {
+                            axioms.push(formula);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
-        Ok(parsed)
+        Ok((axioms, conjectures, extras))
     }
 
     #[pyfn(module, "graph")]

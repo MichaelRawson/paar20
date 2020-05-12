@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 nom = "5"
 numpy = "0.8"
 petgraph = "0.5"
-tptp = "0.20"
+tptp = "0.22"
 
 [dependencies.pyo3]
 version = "0.9"

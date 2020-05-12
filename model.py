@@ -4,9 +4,9 @@ from torch.nn.functional import softmax, relu
 from torch.nn.init import xavier_normal_
 
 NODE_TYPES = 11
-CHANNELS = 32
+CHANNELS = 64
 HIDDEN_LAYER = 1024
-RESIDUAL_LAYERS = 8
+RESIDUAL_LAYERS = 16
 
 class Conv(Module):
     def __init__(self):
@@ -42,9 +42,9 @@ class BiConvRes(Module):
 
     def forward(self, skip, adjacency, adjacency_t):
         nodes = skip
-        nodes = relu(self.bn1(nodes))
+        nodes = self.bn1(relu(nodes))
         nodes = self.conv1(nodes, adjacency, adjacency_t)
-        nodes = relu(self.bn2(nodes))
+        nodes = self.bn2(relu(nodes))
         nodes = self.conv2(nodes, adjacency, adjacency_t)
         return skip + nodes
 
@@ -54,15 +54,21 @@ class Model(Module):
         self.embedding = Embedding(NODE_TYPES, CHANNELS)
         self.conv0 = BiConv()
         self.res = ModuleList([BiConvRes() for _ in range(RESIDUAL_LAYERS)])
-        self.hidden = Linear(CHANNELS, HIDDEN_LAYER)
+        self.hidden = Linear((RESIDUAL_LAYERS + 2) * CHANNELS, HIDDEN_LAYER)
         self.output = Linear(HIDDEN_LAYER, 1)
 
     def forward(self, nodes, adjacency, adjacency_t, indices):
+        log = []
         nodes = self.embedding(nodes)
+        log.append(nodes)
         nodes = self.conv0(nodes, adjacency, adjacency_t)
+        log.append(nodes)
         for res in self.res:
-            nodes = res(nodes, adjacency, adjacency_t)
+             nodes = res(nodes, adjacency, adjacency_t)
+             log.append(nodes)
+
+        nodes = torch.cat(log, dim=1)
+        nodes = nodes[indices]
         nodes = self.hidden(relu(nodes))
         nodes = self.output(relu(nodes)).squeeze()
-        nodes = nodes[indices]
         return softmax(nodes, dim=0)

@@ -19,14 +19,16 @@ def uct(parent, child):
 class Node:
     executor = ThreadPoolExecutor(4)
 
-    def __init__(self, baseline, axioms, selected):
+    def __init__(self, baseline, axioms, selected, extras):
         self.baseline = baseline
         self.visits = 1
         self.closed = False
         self.children = None
         try:
-            self.raw_score = self.baseline - atp.score(axioms, selected)
-            self.inferences = axioms + atp.infer(selected)
+            self.raw_score = self.baseline - atp.score(axioms, selected, extras)
+            inferred, extras = atp.infer(selected, extras)
+            self.inferences = axioms + inferred
+            self.extras = extras
         except (atp.Crashed, atp.Timeout) as _:
             self.raw_score = -baseline
             self.closed = True
@@ -55,7 +57,7 @@ class Node:
                 selected,
                 inference
             )
-            return Node(self.baseline, new_axioms, new_selected)
+            return Node(self.baseline, new_axioms, new_selected, self.extras)
         self.children = list(Node.executor.map(new_child, self.inferences))
         if not self.children:
             self.closed = True
