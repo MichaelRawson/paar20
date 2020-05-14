@@ -30,4 +30,4 @@ To run an experiment as described in the paper, it might look a little like this
 Older commits in this repository implement some sort of off-the-shelf RL instead of our newer method.
 Commits typically represent days where it was working, which it very rarely does.
 If you are an RL expert, have a laugh at our expense and implement it yourself.
-If you are not: here be dragons.
+If you are not: [here be dragons](https://www.alexirpan.com/2018/02/14/rl-hard.html).
