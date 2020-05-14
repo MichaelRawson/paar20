@@ -1,7 +1,7 @@
 import subprocess
 import clauses
 
-VAMPIRE = 'vampire_hol'
+VAMPIRE = 'vampire'
 VAMPIRE_STARTUP = 4e7
 TIMEOUT = 10.0
 
@@ -15,7 +15,7 @@ class Timeout(Exception):
     pass
 
 def tptp_clause(role, clause):
-    return f"thf(c, {role}, {clause}).\n".encode('ascii')
+    return f"cnf(c, {role}, {clause}).\n".encode('ascii')
 
 def clausify(path):
     try:
@@ -44,7 +44,6 @@ def score(axioms, selected, extras):
             '-p', 'off',
             '-av', 'off',
             '-sa',  'discount',
-            '-csup', 'on'
         ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
@@ -78,7 +77,6 @@ def infer(selected, extras):
             VAMPIRE,
             '-av', 'off',
             '-sa',  'discount',
-            '-csup', 'on',
             '--max_age', '1'
         ],
             stdin=subprocess.PIPE,
